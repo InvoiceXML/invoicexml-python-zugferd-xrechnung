@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "invoicexml-zugferd-xrechnung"
+version = "0.1.0"
+description = "Python client for ZUGFeRD and XRechnung e-invoices: create ZUGFeRD PDF/A-3 and XRechnung XML from EN 16931 data, validate, embed, render and extract, via the InvoiceXML API."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "InvoiceXML", email = "support@invoicexml.com" }]
+keywords = ["zugferd", "xrechnung", "e-invoicing", "einvoice", "en16931", "e-rechnung", "cii", "ubl", "pdf/a-3", "invoice"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial :: Accounting",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://invoicexml.com"
+Documentation = "https://api.invoicexml.com/v1/scalar/"
+Repository = "https://github.com/InvoiceXML/invoicexml-python-zugferd-xrechnung"
+Issues = "https://github.com/InvoiceXML/invoicexml-python-zugferd-xrechnung/issues"
+Changelog = "https://github.com/InvoiceXML/invoicexml-python-zugferd-xrechnung/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/invoicexml_zugferd_xrechnung"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "tools", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = ["live: calls the real API and consumes credits (opt in with INVOICEXML_LIVE=1)"]
