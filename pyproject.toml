@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "invoicexml-zugferd-xrechnung"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python client for ZUGFeRD and XRechnung e-invoices: create ZUGFeRD PDF/A-3 and XRechnung XML from EN 16931 data, validate, embed, render and extract, via the InvoiceXML API."
 readme = "README.md"
 requires-python = ">=3.10"
