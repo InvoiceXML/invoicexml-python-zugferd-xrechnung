@@ -8,6 +8,8 @@ import pytest
 
 from conftest import sample_invoice
 from invoicexml_zugferd_xrechnung import (
+    EmailMessage,
+    EmailSendResult,
     InvoiceDocument,
     InvoiceNote,
     InvoiceOptions,
@@ -71,3 +73,30 @@ def test_bytes_are_base64():
     doc = AdditionalSupportingDocument(attachment=b"hello")
     assert doc.to_dict() == {"attachment": "aGVsbG8="}
     assert AdditionalSupportingDocument.from_dict({"attachment": "aGVsbG8="}).attachment == b"hello"
+
+
+def test_email_message_serializes_to_the_wire_keys():
+    message = EmailMessage(from_="invoices@acme.de", to="ap@buyer.de", from_name="Acme", reply_to="help@acme.de")
+
+    assert message.to_dict() == {"from": "invoices@acme.de", "fromName": "Acme", "to": "ap@buyer.de",
+                                 "replyTo": "help@acme.de"}
+
+
+def test_email_message_requires_sender_and_recipient():
+    with pytest.raises(TypeError):
+        EmailMessage(to="ap@buyer.de")  # type: ignore[call-arg]
+
+
+def test_printing_an_email_message_reveals_no_address_or_text():
+    message = EmailMessage(from_="invoices@acme.de", to="ap@buyer.de", from_name="Acme", cc=["cc@acme.de"],
+                           bcc=["bcc@acme.de"], reply_to="help@acme.de", subject="Rechnung", message="Guten Tag")
+
+    for printed in (repr(message), str(message), f"{message}"):
+        for secret in ("invoices@acme.de", "ap@buyer.de", "Acme", "cc@acme.de", "bcc@acme.de", "help@acme.de",
+                       "Rechnung", "Guten Tag"):
+            assert secret not in printed
+
+
+def test_email_send_result_reads_the_answer():
+    assert EmailSendResult.from_dict({"status": "accepted", "messageId": "0102abc", "new": 1}) == EmailSendResult(
+        status="accepted", message_id="0102abc")

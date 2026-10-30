@@ -16,7 +16,7 @@ pip install invoicexml-zugferd-xrechnung
 
 ## Get an API key
 
-Sign up at [invoicexml.com/account/signup](https://www.invoicexml.com/account/signup) for a 30-day free trial with 100 credits. No credit card is needed. The client reads the key from the `INVOICEXML_API_KEY` environment variable, or you pass it as `api_key`.
+Sign up at [www.invoicexml.com/account/signup](https://www.invoicexml.com/account/signup) for a 30-day free trial with 100 credits. No credit card is needed. The client reads the key from the `INVOICEXML_API_KEY` environment variable, or you pass it as `api_key`.
 
 ## Create a ZUGFeRD invoice
 
@@ -49,6 +49,9 @@ Totals and the VAT breakdown are calculated from the lines. The PDF is a ZUGFeRD
 | `validate_zugferd(pdf)` | `POST /v1/validate/zugferd` | `ValidationResult` |
 | `validate_xrechnung(xml)` | `POST /v1/validate/xrechnung` | `ValidationResult` |
 | `embed_zugferd(pdf, xml, *, skip_validation=False)` | `POST /v1/embed/zugferd` | ZUGFeRD PDF/A-3 (`bytes`) |
+| `email_zugferd(invoice, email, options=None)` | `POST /v1/create/zugferd/email` | `EmailSendResult` |
+| `email_xrechnung(invoice, email, options=None)` | `POST /v1/create/xrechnung/email` | `EmailSendResult` |
+| `email_embedded_zugferd(pdf, xml, email)` | `POST /v1/embed/zugferd/email` | `EmailSendResult` |
 | `render_xrechnung_to_pdf(xml, *, language=None, logo_url=None)` | `POST /v1/render/xrechnung/to/pdf` | Readable PDF (`bytes`) |
 | `extract_json(file)` | `POST /v1/extract/json` | `InvoiceDocument` |
 | `extract_attachments(file)` | `POST /v1/extract/attachments` | ZIP of embedded documents (`bytes`) |
@@ -68,6 +71,25 @@ For ZUGFeRD, the options also set the PDF language, a logo, a brand colour, or y
 ```python
 pdf = client.create_zugferd(invoice, InvoiceOptions(language=PdfLanguage.DE, logo_url="https://example.com/logo.png"))
 ```
+
+## Send an invoice by email
+
+Create the invoice and have it emailed to the recipient in one call, from your own domain. The invoice is validated exactly like on the create call:
+
+```python
+email = EmailMessage(from_="invoices@yourcompany.com", to="buyer@example.com", from_name="Your Company Billing",
+                     cc=["accounting@yourcompany.com"], subject="Invoice RE-2026-001")
+result = client.email_zugferd(invoice, email)
+print(result.status, result.message_id)
+```
+
+`email_xrechnung(invoice, email)` does the same for an XRechnung, and `email_embedded_zugferd("invoice.pdf", "invoice.xml", email)` embeds your XML into your PDF first, always with full validation. These calls send a real email and return the message id, not the file. The status `accepted` means the email was handed over for delivery, not yet that the recipient's server received it.
+
+The sender must be on a domain added and verified on the Verified email domains page of your dashboard. `cc` and `bcc` hold at most 2 addresses together. See the [email guide](https://www.invoicexml.com/docs/api/create/zugferd/email).
+
+An unverified sender domain raises `InvoiceXmlApiError` with `ErrorCode.EMAIL_DOMAIN_NOT_VERIFIED`, `EMAIL_NOT_IN_PLAN` means [your plan does not include this](https://www.invoicexml.com/pricing), and `EMAIL_SENDING_DISABLED` means sending is disabled or paused for your account. None of these consume credits. A bad address raises `InvoiceValidationError` with the affected `email.*` field.
+
+Only HTTP 429 is retried, because nothing was sent. Other failures are never retried, since a second attempt could send a second email. After a timeout, a connection failure or a 503 with `ErrorCode.PROCESSING_TIMEOUT` (4023), which can happen while the send is in flight, the outcome is unknown, so check before you send it again.
 
 ## Rejected invoices
 
@@ -121,8 +143,8 @@ The client holds no connection state and is safe to share between threads. To se
 
 - **Rule sets updated on their legal effective dates.** New ZUGFeRD, XRechnung and EN 16931 rule versions go live on the API the day they take legal effect. The rules run on the server, so you never update this package or redeploy for a new rule version.
 - **Validated before delivery.** Every document is checked against the official XSD and Schematron rules before it is returned.
-- **Zero data retention.** Invoices are processed in memory and purged when the response is delivered. Nothing is stored or logged, and nothing is used for AI training.
-- **Processing in Frankfurt.** All processing happens in the EU, in Frankfurt, Germany. See [invoicexml.com/trust](https://www.invoicexml.com/trust).
+- **Zero data retention.** Invoices are processed in memory and purged when the response is delivered. Nothing is stored or logged, and nothing is used for AI training. When you email an invoice, it goes to our email service for delivery, and we keep no copy.
+- **Processing in Frankfurt.** All processing happens in the EU, in Frankfurt, Germany. See [www.invoicexml.com/trust](https://www.invoicexml.com/trust).
 - **Integration assistance.** Questions about your integration go to [support@invoicexml.com](mailto:support@invoicexml.com), from setup to your first production invoice.
 
 ## Documentation

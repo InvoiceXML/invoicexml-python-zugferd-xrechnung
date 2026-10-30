@@ -9,6 +9,8 @@ import pytest
 from conftest import fixture, sample_invoice
 from invoicexml_zugferd_xrechnung import (
     AuthenticationError,
+    EmailMessage,
+    EmailSendResult,
     ErrorCode,
     FileUpload,
     InvoiceOptions,
@@ -25,6 +27,7 @@ from invoicexml_zugferd_xrechnung.validation import LAYER_CIUS, LAYER_EN16931
 
 PDF = b"%PDF-1.7 stub"
 XML = '<?xml version="1.0"?><Invoice/>'
+SENT = {"status": "accepted", "messageId": "0102abc"}
 
 
 def text(request) -> str:
@@ -180,6 +183,222 @@ def test_embed_zugferd_can_skip_validation(client, stub):
     client.embed_zugferd(PDF, XML.encode(), skip_validation=True)
 
     assert 'name="skipValidation"\r\n\r\ntrue\r\n' in text(stub.last)
+
+
+# -------------------------------------------------------------------- email
+
+def test_email_zugferd_posts_invoice_and_email_and_returns_the_message_id(client, stub):
+    stub.respond_json(200, SENT)
+
+    result = client.email_zugferd(sample_invoice(), EmailMessage(from_="invoices@acme.de", to="ap@buyer.de"))
+
+    assert result == EmailSendResult(status="accepted", message_id="0102abc")
+    r = stub.last
+    assert r.method == "POST"
+    assert r.url == "https://api.invoicexml.com/v1/create/zugferd/email"
+    assert r.header("Content-Type") == "application/json"
+    assert r.header("Accept") == "application/json"
+    sent = json.loads(r.body)
+    assert sent["invoice"]["invoiceNumber"] == "RE-2026-001"
+    assert sent["email"] == {"from": "invoices@acme.de", "to": "ap@buyer.de"}, "unset fields are omitted"
+    assert "options" not in sent
+
+
+def test_email_zugferd_sends_every_email_field_with_its_wire_key(client, stub):
+    stub.respond_json(200, SENT)
+
+    client.email_zugferd(sample_invoice(), EmailMessage(
+        from_="invoices@acme.de", to="ap@buyer.de", from_name="Acme Billing", cc=["a@acme.de"], bcc=["b@acme.de"],
+        reply_to="help@acme.de", subject="Rechnung", message="Guten Tag"), InvoiceOptions(language=PdfLanguage.DE))
+
+    sent = json.loads(stub.last.body)
+    assert sent["options"] == {"language": "DE"}
+    assert sent["email"] == {"from": "invoices@acme.de", "fromName": "Acme Billing", "to": "ap@buyer.de",
+                             "cc": ["a@acme.de"], "bcc": ["b@acme.de"], "replyTo": "help@acme.de",
+                             "subject": "Rechnung", "message": "Guten Tag"}
+
+
+def test_email_xrechnung_uses_its_route_and_sends_syntax(client, stub):
+    stub.respond_json(200, SENT)
+
+    result = client.email_xrechnung(sample_invoice(), EmailMessage(from_="invoices@acme.de", to="ap@buyer.de"),
+                                    InvoiceOptions(syntax=XRechnungSyntax.CII))
+
+    assert result.message_id == "0102abc"
+    assert stub.last.url == "https://api.invoicexml.com/v1/create/xrechnung/email"
+    sent = json.loads(stub.last.body)
+    assert sent["options"]["syntax"] == "cii"
+    assert sent["email"]["from"] == "invoices@acme.de"
+
+
+def test_email_accepts_plain_dicts_and_drops_none(client, stub):
+    stub.respond_json(200, SENT)
+
+    client.email_zugferd({"invoiceNumber": "X-1"}, {"from": "invoices@acme.de", "to": "ap@buyer.de", "cc": None})
+
+    assert json.loads(stub.last.body) == {"invoice": {"invoiceNumber": "X-1"},
+                                          "email": {"from": "invoices@acme.de", "to": "ap@buyer.de"}}
+
+
+def test_email_embedded_zugferd_sends_files_and_form_fields(client, stub):
+    stub.respond_json(200, SENT)
+
+    result = client.email_embedded_zugferd(PDF, FileUpload.xml(XML), EmailMessage(
+        from_="invoices@acme.de", to="ap@buyer.de", from_name="Acme Büro", cc=["a@acme.de", "b@acme.de"],
+        bcc=["c@acme.de"], reply_to="help@acme.de", subject="Rechnung", message="Guten Tag"))
+
+    assert result.status == "accepted"
+    assert result.message_id == "0102abc"
+    r = stub.last
+    assert r.url == "https://api.invoicexml.com/v1/embed/zugferd/email"
+    assert r.header("Accept") == "application/json"
+    assert r.header("Content-Type").startswith("multipart/form-data; boundary=")
+    body = text(r)
+    assert 'name="pdf"; filename="invoice.pdf"' in body
+    assert 'name="xml"; filename="invoice.xml"' in body
+    assert 'name="email.from"\r\n\r\ninvoices@acme.de\r\n' in body
+    assert 'name="email.fromName"\r\n\r\nAcme Büro\r\n' in body
+    assert 'name="email.to"\r\n\r\nap@buyer.de\r\n' in body
+    assert 'name="email.cc"\r\n\r\na@acme.de\r\n' in body
+    assert 'name="email.cc"\r\n\r\nb@acme.de\r\n' in body
+    assert body.count('name="email.cc"') == 2, "one form part per address"
+    assert 'name="email.bcc"\r\n\r\nc@acme.de\r\n' in body
+    assert 'name="email.replyTo"\r\n\r\nhelp@acme.de\r\n' in body
+    assert 'name="email.subject"\r\n\r\nRechnung\r\n' in body
+    assert 'name="email.message"\r\n\r\nGuten Tag\r\n' in body
+    assert "skipValidation" not in body
+
+
+def test_email_embedded_zugferd_omits_unset_fields(client, stub):
+    stub.respond_json(200, SENT)
+
+    client.email_embedded_zugferd(PDF, XML.encode(), {"from": "invoices@acme.de", "to": "ap@buyer.de", "cc": None})
+
+    body = text(stub.last)
+    assert body.count('name="email.') == 2
+    assert 'name="email.from"' in body
+    assert 'name="email.to"' in body
+
+
+def test_a_single_copy_address_is_one_part_not_one_per_letter(client, stub):
+    stub.respond_json(200, SENT).respond_json(200, SENT)
+
+    client.email_embedded_zugferd(PDF, XML.encode(), {"from": "i@acme.de", "to": "t@buyer.de", "cc": "a@acme.de"})
+    client.email_embedded_zugferd(PDF, XML.encode(), EmailMessage(from_="i@acme.de", to="t@buyer.de", bcc="b@acme.de"))
+
+    assert text(stub.requests[0]).count('name="email.cc"') == 1
+    assert text(stub.requests[1]).count('name="email.bcc"') == 1
+
+
+def test_email_requires_an_invoice_and_an_email(client):
+    message = EmailMessage(from_="invoices@acme.de", to="ap@buyer.de")
+    with pytest.raises(TypeError):
+        client.email_zugferd(None, message)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        client.email_xrechnung(sample_invoice(), None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        client.email_embedded_zugferd(PDF, XML.encode(), None)  # type: ignore[arg-type]
+
+
+def test_unverified_sender_domain_surfaces_its_error_code(client, stub):
+    stub.respond_json(400, {"title": "Sending domain not verified", "errorCode": 4022,
+                            "detail": "The sending domain acme.de is not verified yet."})
+
+    with pytest.raises(InvoiceXmlApiError) as info:
+        client.email_zugferd(sample_invoice(), EmailMessage(from_="invoices@acme.de", to="ap@buyer.de"))
+
+    assert info.value.status_code == 400
+    assert info.value.error_code == ErrorCode.EMAIL_DOMAIN_NOT_VERIFIED
+    assert not isinstance(info.value, InvoiceValidationError)
+
+
+@pytest.mark.parametrize("code, name", [(4020, "EMAIL_NOT_IN_PLAN"), (4021, "EMAIL_SENDING_DISABLED")])
+def test_blocked_sending_surfaces_its_error_code(client, stub, code, name):
+    stub.respond_json(403, {"title": "Forbidden", "errorCode": code})
+
+    with pytest.raises(InvoiceXmlApiError) as info:
+        client.email_embedded_zugferd(PDF, XML.encode(), EmailMessage(from_="invoices@acme.de", to="ap@buyer.de"))
+
+    assert info.value.status_code == 403
+    assert info.value.error_code == ErrorCode[name]
+
+
+def test_email_field_findings_arrive_as_a_validation_error(client, stub):
+    stub.respond_json(400, {"title": "Invalid request", "errorCode": 4002,
+                            "errors": [{"message": "to is not a valid address.", "fields": ["email.to"]}]})
+
+    with pytest.raises(InvoiceValidationError) as info:
+        client.email_xrechnung(sample_invoice(), EmailMessage(from_="invoices@acme.de", to="nope"))
+
+    assert info.value.error_code == ErrorCode.MODEL_VALIDATION
+    assert info.value.errors[0].fields == ["email.to"]
+
+
+def test_email_is_retried_after_a_rate_limit_only(client, stub, sleeps):
+    stub.respond_json(429, {"title": "Too many requests", "errorCode": 4019}, Retry_After="2")
+    stub.respond_json(200, SENT)
+
+    assert client.email_zugferd(sample_invoice(), EmailMessage(from_="i@acme.de", to="t@buyer.de")).status == "accepted"
+    assert sleeps == [2.0]
+    assert len(stub.requests) == 2
+
+
+def test_email_is_not_retried_after_a_server_error(client, stub):
+    stub.respond(502, "bad gateway", "text/plain")
+
+    with pytest.raises(InvoiceXmlApiError):
+        client.email_zugferd(sample_invoice(), EmailMessage(from_="i@acme.de", to="t@buyer.de"))
+    assert len(stub.requests) == 1
+
+
+def test_email_is_not_retried_after_a_network_failure(client, stub):
+    stub.fail(TimeoutError("timed out"))
+
+    with pytest.raises(InvoiceXmlConnectionError):
+        client.email_embedded_zugferd(PDF, XML.encode(), EmailMessage(from_="i@acme.de", to="t@buyer.de"))
+    assert len(stub.requests) == 1
+
+
+@pytest.mark.parametrize("key", ["from", "fromName", "to", "replyTo", "subject", "message"])
+def test_email_refuses_a_list_in_a_single_value_field_on_both_route_types(client, stub, key):
+    email = {"from": "i@acme.de", "to": "t@buyer.de", key: ["one@acme.de", "two@acme.de"]}
+
+    with pytest.raises(TypeError, match=f"email.{key}"):
+        client.email_zugferd(sample_invoice(), email)
+    with pytest.raises(TypeError, match=f"email.{key}"):
+        client.email_embedded_zugferd(PDF, XML.encode(), email)
+    assert stub.requests == []
+
+
+def test_email_message_refuses_a_list_in_a_single_value_field(client, stub):
+    with pytest.raises(TypeError, match="email.to"):
+        client.email_zugferd(sample_invoice(), EmailMessage(from_="i@acme.de", to=["a@buyer.de", "b@buyer.de"]))  # type: ignore[arg-type]
+    assert stub.requests == []
+
+
+def test_blank_copy_addresses_are_dropped_on_both_route_types(client, stub):
+    stub.respond_json(200, SENT).respond_json(200, SENT)
+    email = EmailMessage(from_="i@acme.de", to="t@buyer.de", cc=[" ", " a@acme.de "], bcc=[""])
+
+    client.email_zugferd(sample_invoice(), email)
+    client.email_embedded_zugferd(PDF, XML.encode(), email)
+
+    assert json.loads(stub.requests[0].body)["email"] == {"from": "i@acme.de", "to": "t@buyer.de", "cc": ["a@acme.de"]}
+    body = text(stub.requests[1])
+    assert body.count('name="email.cc"') == 1
+    assert 'name="email.cc"\r\n\r\na@acme.de\r\n' in body
+    assert 'name="email.bcc"' not in body
+
+
+def test_a_single_copy_address_in_a_dict_is_a_list_on_both_route_types(client, stub):
+    stub.respond_json(200, SENT).respond_json(200, SENT)
+    email = {"from": "i@acme.de", "to": "t@buyer.de", "cc": "a@acme.de"}
+
+    client.email_zugferd(sample_invoice(), email)
+    client.email_embedded_zugferd(PDF, XML.encode(), email)
+
+    assert json.loads(stub.requests[0].body)["email"]["cc"] == ["a@acme.de"]
+    assert 'name="email.cc"\r\n\r\na@acme.de\r\n' in text(stub.requests[1])
 
 
 # ------------------------------------------------------------------- render

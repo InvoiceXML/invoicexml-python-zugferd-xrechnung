@@ -23,6 +23,7 @@ from ._errors import (
 )
 from ._files import FileInput, FileUpload, to_upload
 from ._version import __version__
+from .emails import EmailMessage, EmailSendResult
 from .models import CreateInvoiceRequest, InvoiceDocument, InvoiceOptions, PdfLanguage
 from .transport import Transport, TransportRequest, TransportResponse, UrllibTransport
 from .validation import ValidationFinding, ValidationResult
@@ -32,6 +33,7 @@ API_KEY_ENV = "INVOICEXML_API_KEY"
 
 InvoiceInput = InvoiceDocument | Mapping[str, Any]
 OptionsInput = InvoiceOptions | Mapping[str, Any] | None
+EmailInput = EmailMessage | Mapping[str, Any]
 
 
 class ZugferdXRechnungClient:
@@ -41,6 +43,7 @@ class ZugferdXRechnungClient:
     >>> pdf = client.create_zugferd(invoice)        # ZUGFeRD PDF/A-3 bytes
     >>> xml = client.create_xrechnung(invoice)      # XRechnung XML (UBL)
     >>> result = client.validate_zugferd("incoming.pdf")
+    >>> sent = client.email_zugferd(invoice, EmailMessage(from_=sender, to=buyer))
 
     Every create call validates the invoice against the full rule set before the
     document is returned. A rejected invoice raises :class:`InvoiceValidationError`
@@ -156,6 +159,61 @@ class ZugferdXRechnungClient:
             parts.append(("skipValidation", "true"))
         return self._post_form("/v1/embed/zugferd", parts).body
 
+    # ------------------------------------------------------------------- email
+
+    def email_zugferd(self, invoice: InvoiceInput, email: EmailInput, options: OptionsInput = None) -> EmailSendResult:
+        """Create a ZUGFeRD hybrid invoice and send it by email.
+
+        Builds the same PDF as :meth:`create_zugferd`, then sends a real email
+        from your own verified domain. The file does not come back.
+
+        :param invoice: The invoice, as a model or a dict in the API's JSON shape.
+        :param email: The email, as an :class:`EmailMessage` or a dict in the API's JSON shape.
+        :param options: Language, logo, brand colour, or your own PDF as the visual layer.
+        :returns: The message id. ``accepted`` means handed over for delivery, not yet
+            received by the recipient's server.
+        :raises InvoiceValidationError: The invoice or the email is invalid.
+        :raises InvoiceXmlApiError: With ``ErrorCode.EMAIL_DOMAIN_NOT_VERIFIED`` when the
+            sender's domain is not verified.
+        """
+        return self._send_json("/v1/create/zugferd/email", invoice, email, options)
+
+    def email_xrechnung(self, invoice: InvoiceInput, email: EmailInput, options: OptionsInput = None) -> EmailSendResult:
+        """Create an XRechnung and send it by email.
+
+        Builds the same XML as :meth:`create_xrechnung`, then sends a real email
+        from your own verified domain. The file does not come back.
+
+        :param invoice: The invoice, as a model or a dict in the API's JSON shape.
+        :param email: The email, as an :class:`EmailMessage` or a dict in the API's JSON shape.
+        :param options: Set ``syntax=XRechnungSyntax.CII`` for the CII syntax.
+        :returns: The message id. ``accepted`` means handed over for delivery, not yet
+            received by the recipient's server.
+        :raises InvoiceValidationError: The invoice or the email is invalid.
+        :raises InvoiceXmlApiError: With ``ErrorCode.EMAIL_DOMAIN_NOT_VERIFIED`` when the
+            sender's domain is not verified.
+        """
+        return self._send_json("/v1/create/xrechnung/email", invoice, email, options)
+
+    def email_embedded_zugferd(self, pdf: FileInput, xml: FileInput, email: EmailInput) -> EmailSendResult:
+        """Embed a CII invoice XML into an existing PDF and send the ZUGFeRD PDF/A-3 by email.
+
+        Builds the same PDF as :meth:`embed_zugferd`, always with the full rule set,
+        then sends a real email from your own verified domain. The file does not
+        come back.
+
+        :param pdf: The visual PDF.
+        :param xml: The CII XML.
+        :param email: The email, as an :class:`EmailMessage` or a dict in the API's JSON shape.
+        :returns: The message id. ``accepted`` means handed over for delivery, not yet
+            received by the recipient's server.
+        :raises InvoiceValidationError: The XML or the email is invalid.
+        :raises InvoiceXmlApiError: With ``ErrorCode.EMAIL_DOMAIN_NOT_VERIFIED`` when the
+            sender's domain is not verified.
+        """
+        parts: list[tuple[str, Any]] = [("pdf", to_upload(pdf)), ("xml", to_upload(xml))]
+        return self._send_form("/v1/embed/zugferd/email", parts + _email_parts(email))
+
     # ------------------------------------------------------------------ render
 
     def render_xrechnung_to_pdf(self, xml: FileInput, *, language: PdfLanguage | str | None = None,
@@ -214,6 +272,18 @@ class ZugferdXRechnungClient:
         response = self._post_form(path, parts, accept_json=True)
         return ValidationResult.from_dict(self._read_json(response, path))
 
+    def _send_json(self, path: str, invoice: InvoiceInput, email: EmailInput, options: OptionsInput) -> EmailSendResult:
+        if invoice is None:
+            raise TypeError("invoice must not be None")
+        request = CreateInvoiceRequest(invoice=invoice, options=options)  # type: ignore[arg-type]
+        body = _serde.dumps({**request.to_dict(), "email": _email_fields(email)}).encode("utf-8")
+        response = self._execute(path, "application/json", body, accept_json=True)
+        return EmailSendResult.from_dict(self._read_json(response, path))
+
+    def _send_form(self, path: str, parts: list[tuple[str, Any]]) -> EmailSendResult:
+        response = self._post_form(path, parts, accept_json=True)
+        return EmailSendResult.from_dict(self._read_json(response, path))
+
     @staticmethod
     def _read_json(response: TransportResponse, path: str) -> Mapping[str, Any]:
         try:
@@ -251,6 +321,42 @@ class ZugferdXRechnungClient:
                     attempt += 1
                     continue
             raise _to_error(response, self._now())
+
+
+def _email_fields(email: EmailInput) -> dict[str, Any]:
+    """Return the email as sent, by the same rules on the JSON and the form routes.
+
+    Only ``cc`` and ``bcc`` take a list, because a form route would lose all but the
+    first item of any other field. They also take one address, without blank entries.
+    """
+    if email is None:
+        raise TypeError("email must not be None")
+    fields: dict[str, Any] = {}
+    for key, value in (email.to_dict() if isinstance(email, EmailMessage) else email).items():
+        if value is None:
+            continue
+        if key in ("cc", "bcc"):
+            addresses = _copy_addresses(value)
+            if addresses:
+                fields[key] = addresses
+        elif isinstance(value, str):
+            fields[key] = value
+        else:
+            raise TypeError(f"email.{key} takes a single value. Only cc and bcc take a list.")
+    return fields
+
+
+def _copy_addresses(value: Any) -> list[str]:
+    items = [value] if isinstance(value, str) else value
+    return [item.strip() for item in items if item is not None and item.strip()]
+
+
+def _email_parts(email: EmailInput) -> list[tuple[str, Any]]:
+    parts: list[tuple[str, Any]] = []
+    for key, value in _email_fields(email).items():
+        for item in [value] if isinstance(value, str) else value:
+            parts.append((f"email.{key}", item))
+    return parts
 
 
 def _multipart(parts: list[tuple[str, Any]]) -> tuple[str, bytes]:

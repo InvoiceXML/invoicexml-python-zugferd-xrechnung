@@ -21,6 +21,7 @@ from ._errors import (
 )
 from ._files import FileInput, FileUpload
 from ._version import __version__
+from .emails import EmailMessage, EmailSendResult
 from .models import *  # noqa: F401,F403
 from .models import __all__ as _model_names
 from .validation import ReportFinding, ReportRow, ValidationData, ValidationFinding, ValidationResult
@@ -28,6 +29,8 @@ from .validation import ReportFinding, ReportRow, ValidationData, ValidationFind
 __all__ = [
     "DEFAULT_BASE_URL",
     "AuthenticationError",
+    "EmailMessage",
+    "EmailSendResult",
     "ErrorCode",
     "FileInput",
     "FileUpload",
