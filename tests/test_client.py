@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ from invoicexml_zugferd_xrechnung import (
     PayloadTooLargeError,
     PdfLanguage,
     RateLimitError,
+    ValidationReport,
     XRechnungSyntax,
     ZugferdXRechnungClient,
 )
@@ -28,10 +30,25 @@ from invoicexml_zugferd_xrechnung.validation import LAYER_CIUS, LAYER_EN16931
 PDF = b"%PDF-1.7 stub"
 XML = '<?xml version="1.0"?><Invoice/>'
 SENT = {"status": "accepted", "messageId": "0102abc"}
+REPORTS = [("validate_zugferd_report", "/v1/validate/zugferd/report", PDF),
+           ("validate_xrechnung_report", "/v1/validate/xrechnung/report", XML.encode())]
+CONVERT_TO_XML = [("convert_zugferd_to_ubl", "/v1/convert/zugferd/to/ubl", PDF),
+                  ("convert_zugferd_to_cii", "/v1/convert/zugferd/to/cii", PDF),
+                  ("convert_xrechnung_to_ubl", "/v1/convert/xrechnung/to/ubl", XML.encode()),
+                  ("convert_xrechnung_to_cii", "/v1/convert/xrechnung/to/cii", XML.encode()),
+                  ("convert_ubl_to_xrechnung", "/v1/convert/ubl/to/xrechnung", XML.encode()),
+                  ("convert_cii_to_xrechnung", "/v1/convert/cii/to/xrechnung", XML.encode())]
+CONVERT_TO_HYBRID = [("convert_cii_to_zugferd", "/v1/convert/cii/to/zugferd"),
+                     ("convert_ubl_to_zugferd", "/v1/convert/ubl/to/zugferd"),
+                     ("convert_xrechnung_to_zugferd", "/v1/convert/xrechnung/to/zugferd")]
 
 
 def text(request) -> str:
     return request.body.decode("utf-8")
+
+
+def part_names(request) -> list[str]:
+    return re.findall(r'form-data; name="([^"]+)"', text(request))
 
 
 # ------------------------------------------------------------------- create
@@ -161,6 +178,50 @@ def test_validate_xrechnung_reports_invalid_invoice_without_raising(client, stub
     assert result.report[0].errors[0].rule == "BR-DE-15"
     assert 'filename="invoice.xml"' in text(stub.last), "raw XML bytes are detected as XML"
     assert "Content-Type: application/xml" in text(stub.last)
+
+
+@pytest.mark.parametrize("method, route, file", REPORTS)
+@pytest.mark.parametrize("header, valid", [("true", True), ("false", False), ("False", False), ("maybe", None)])
+def test_validation_report_returns_the_pdf_and_the_verdict(client, stub, method, route, file, header, valid):
+    stub.respond(200, PDF, "application/pdf", X_Invoice_Valid=header)
+
+    report = getattr(client, method)(file)
+
+    assert report == ValidationReport(file=PDF, valid=valid)
+    assert stub.last.url == f"https://api.invoicexml.com{route}"
+    assert stub.last.header("Accept") is None
+    assert part_names(stub.last) == ["file"]
+
+
+@pytest.mark.parametrize("method, route, file", REPORTS)
+def test_validation_report_without_the_header_has_no_verdict(client, stub, method, route, file):
+    stub.respond(200, PDF, "application/pdf")
+
+    report = getattr(client, method)(file)
+
+    assert report.file == PDF
+    assert report.valid is None
+
+
+@pytest.mark.parametrize("method, route, file", REPORTS)
+def test_validation_report_sends_the_validation_language(client, stub, method, route, file):
+    stub.respond(200, PDF, "application/pdf", X_Invoice_Valid="false")
+
+    getattr(client, method)(file, validation_language=PdfLanguage.DE)
+
+    assert 'name="validationLanguage"\r\n\r\nde\r\n' in text(stub.last)
+
+
+def test_validation_report_transport_problem_raises(client, stub):
+    stub.respond_json(400, {"title": "Missing file", "errorCode": 4003})
+
+    with pytest.raises(InvoiceXmlApiError) as info:
+        client.validate_zugferd_report(FileUpload.pdf(b""))
+    assert info.value.error_code == ErrorCode.MISSING_FILE
+
+
+def test_validation_report_repr_leaves_out_the_pdf():
+    assert "stub" not in repr(ValidationReport(file=PDF, valid=True))
 
 
 # -------------------------------------------------------------------- embed
@@ -414,6 +475,176 @@ def test_render_xrechnung_sends_language_and_logo(client, stub):
     assert 'name="logoUrl"\r\n\r\nhttps://example.com/logo.png\r\n' in body
 
 
+@pytest.mark.parametrize("method, route", [("render_xrechnung_to_pdf", "/v1/render/xrechnung/to/pdf"),
+                                           ("render_cii_to_pdf", "/v1/render/cii/to/pdf")])
+def test_render_sends_only_what_is_set(client, stub, method, route):
+    stub.respond(200, PDF, "application/pdf").respond(200, PDF, "application/pdf").respond(200, PDF, "application/pdf")
+
+    assert getattr(client, method)(XML.encode()) == PDF
+    getattr(client, method)(XML.encode(), language="DE", logo_url="https://example.com/logo.png", include_qr_code=True)
+    getattr(client, method)(XML.encode(), include_qr_code=False)
+
+    assert stub.requests[0].url == f"https://api.invoicexml.com{route}"
+    assert part_names(stub.requests[0]) == ["file"]
+    assert part_names(stub.requests[1]) == ["file", "language", "logoUrl", "includeQrCode"]
+    assert 'name="language"\r\n\r\nde\r\n' in text(stub.requests[1])
+    assert 'name="includeQrCode"\r\n\r\ntrue\r\n' in text(stub.requests[1])
+    assert 'name="includeQrCode"\r\n\r\nfalse\r\n' in text(stub.requests[2])
+
+
+# ------------------------------------------------------------------ convert
+
+@pytest.mark.parametrize("method, route, file", CONVERT_TO_XML)
+def test_convert_to_xml_returns_text_and_sends_only_the_file(client, stub, method, route, file):
+    stub.respond(200, XML, "application/xml")
+
+    assert getattr(client, method)(file) == XML
+
+    assert stub.last.url == f"https://api.invoicexml.com{route}"
+    assert part_names(stub.last) == ["file"]
+
+
+@pytest.mark.parametrize("method, route, file", CONVERT_TO_XML)
+def test_convert_to_xml_sends_the_validation_language(client, stub, method, route, file):
+    stub.respond(200, XML, "application/xml")
+
+    getattr(client, method)(file, validation_language="DE")
+
+    assert part_names(stub.last) == ["file", "validationLanguage"]
+    assert 'name="validationLanguage"\r\n\r\nde\r\n' in text(stub.last)
+
+
+@pytest.mark.parametrize("method", [name for name, _, _ in CONVERT_TO_XML])
+def test_convert_to_xml_takes_no_language(client, method):
+    with pytest.raises(TypeError):
+        getattr(client, method)(XML.encode(), language="de")
+
+
+@pytest.mark.parametrize("method, route", CONVERT_TO_HYBRID)
+def test_convert_to_hybrid_returns_the_pdf_and_sends_only_the_file(client, stub, method, route):
+    stub.respond(200, PDF, "application/pdf")
+
+    assert getattr(client, method)(XML.encode()) == PDF
+
+    assert stub.last.url == f"https://api.invoicexml.com{route}"
+    assert part_names(stub.last) == ["file"]
+
+
+@pytest.mark.parametrize("method, route", CONVERT_TO_HYBRID)
+def test_convert_to_hybrid_sends_both_languages(client, stub, method, route):
+    stub.respond(200, PDF, "application/pdf")
+
+    getattr(client, method)(XML.encode(), language=PdfLanguage.DE, validation_language="fr")
+
+    body = text(stub.last)
+    assert 'name="language"\r\n\r\nde\r\n' in body
+    assert 'name="validationLanguage"\r\n\r\nfr\r\n' in body
+
+
+def test_convert_rejection_carries_findings(client, stub):
+    stub.respond_json(400, fixture("create-400.json"))
+
+    with pytest.raises(InvoiceValidationError) as info:
+        client.convert_ubl_to_xrechnung(XML.encode())
+    assert info.value.errors[0].rule == "BR-CO-26"
+
+
+def test_convert_of_a_pdf_without_xml_surfaces_its_error_code(client, stub):
+    stub.respond_json(400, {"title": "No embedded XML found", "errorCode": 4006,
+                            "errors": [{"message": "The PDF carries no invoice XML."}]})
+
+    with pytest.raises(InvoiceXmlApiError) as info:
+        client.convert_zugferd_to_ubl(PDF)
+    assert info.value.error_code == ErrorCode.NO_EMBEDDED_XML
+
+
+# ---------------------------------------------------------------- transform
+
+def test_transform_to_zugferd_sends_only_the_file(client, stub):
+    stub.respond(200, PDF, "application/pdf")
+
+    assert client.transform_to_zugferd(PDF) == PDF
+
+    assert stub.last.url == "https://api.invoicexml.com/v1/transform/to/zugferd"
+    assert part_names(stub.last) == ["file"]
+
+
+def test_transform_to_zugferd_sends_every_option(client, stub):
+    stub.respond(200, PDF, "application/pdf")
+
+    client.transform_to_zugferd(PDF, language=PdfLanguage.DE, preserve_original_pdf=True,
+                                include_advanced_properties=True, validation_language="fr")
+
+    body = text(stub.last)
+    assert 'name="language"\r\n\r\nde\r\n' in body
+    assert 'name="preserveOriginalPdf"\r\n\r\ntrue\r\n' in body
+    assert 'name="includeAdvancedProperties"\r\n\r\ntrue\r\n' in body
+    assert 'name="validationLanguage"\r\n\r\nfr\r\n' in body
+
+
+def test_transform_to_zugferd_really_sends_false(client, stub):
+    stub.respond(200, PDF, "application/pdf")
+
+    client.transform_to_zugferd(PDF, preserve_original_pdf=False, include_advanced_properties=False)
+
+    body = text(stub.last)
+    assert 'name="preserveOriginalPdf"\r\n\r\nfalse\r\n' in body
+    assert 'name="includeAdvancedProperties"\r\n\r\nfalse\r\n' in body
+
+
+def test_transform_to_zugferd_takes_auto(client, stub):
+    stub.respond(200, PDF, "application/pdf")
+
+    client.transform_to_zugferd(PDF, language="auto")
+
+    assert 'name="language"\r\n\r\nauto\r\n' in text(stub.last)
+
+
+def test_transform_to_xrechnung_sends_the_buyer_reference(client, stub):
+    stub.respond(200, XML, "application/xml").respond(200, XML, "application/xml")
+
+    assert client.transform_to_xrechnung(PDF, "04011000-12345-34") == XML
+    client.transform_to_xrechnung(PDF, "04011000-12345-34", validation_language=PdfLanguage.DE)
+
+    assert stub.requests[0].url == "https://api.invoicexml.com/v1/transform/to/xrechnung"
+    assert part_names(stub.requests[0]) == ["file", "buyerReference"]
+    assert 'name="buyerReference"\r\n\r\n04011000-12345-34\r\n' in text(stub.requests[0])
+    assert part_names(stub.requests[1]) == ["file", "buyerReference", "validationLanguage"]
+    assert 'name="validationLanguage"\r\n\r\nde\r\n' in text(stub.requests[1])
+
+
+@pytest.mark.parametrize("buyer_reference", [None, "", "  "])
+def test_transform_to_xrechnung_requires_a_buyer_reference(client, stub, buyer_reference):
+    with pytest.raises(ValueError):
+        client.transform_to_xrechnung(PDF, buyer_reference)
+    assert stub.requests == []
+
+
+def test_transform_rejection_carries_findings(client, stub):
+    stub.respond_json(400, fixture("create-400.json"))
+
+    with pytest.raises(InvoiceValidationError) as info:
+        client.transform_to_zugferd(PDF)
+    assert info.value.errors[0].rule == "BR-CO-26"
+
+
+@pytest.mark.parametrize(("route", "call"), [
+    ("zugferd", lambda client: client.transform_to_zugferd(PDF)),
+    ("xrechnung", lambda client: client.transform_to_xrechnung(PDF, "04011000-12345-34")),
+])
+def test_transform_rate_limit_makes_one_request_and_raises(client, stub, sleeps, route, call):
+    stub.respond_json(429, {"title": "Too many requests", "errorCode": 4019}, Retry_After="2")
+
+    with pytest.raises(RateLimitError) as info:
+        call(client)
+
+    assert len(stub.requests) == 1
+    assert stub.last.url == f"https://api.invoicexml.com/v1/transform/to/{route}"
+    assert sleeps == []
+    assert info.value.retry_after == 2.0
+    assert info.value.error_code == ErrorCode.TOO_MANY_REQUESTS
+
+
 # ------------------------------------------------------------------ extract
 
 def test_extract_json_returns_the_invoice_model(client, stub):
@@ -463,6 +694,26 @@ def test_retry_after_http_date_is_honoured(client, stub, sleeps):
     client.create_zugferd(sample_invoice())
 
     assert sleeps == [5.0]
+
+
+def test_render_convert_and_report_retry_after_a_rate_limit(client, stub, sleeps):
+    stub.respond_json(429, {}, Retry_After="1").respond(200, PDF, "application/pdf")
+    stub.respond_json(429, {}, Retry_After="1").respond(200, XML, "application/xml")
+    stub.respond_json(429, {}, Retry_After="1").respond(200, PDF, "application/pdf", X_Invoice_Valid="true")
+
+    client.render_cii_to_pdf(FileUpload.xml(XML))
+    client.convert_zugferd_to_ubl(PDF)
+    client.validate_zugferd_report(PDF)
+
+    assert [request.url.removeprefix("https://api.invoicexml.com") for request in stub.requests] == [
+        "/v1/render/cii/to/pdf",
+        "/v1/render/cii/to/pdf",
+        "/v1/convert/zugferd/to/ubl",
+        "/v1/convert/zugferd/to/ubl",
+        "/v1/validate/zugferd/report",
+        "/v1/validate/zugferd/report",
+    ]
+    assert sleeps == [1.0, 1.0, 1.0]
 
 
 def test_rate_limit_surfaces_after_retries_are_used_up(client, stub, sleeps):
