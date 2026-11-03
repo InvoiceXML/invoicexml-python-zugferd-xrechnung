@@ -25,6 +25,7 @@ from ._files import FileInput, FileUpload, to_upload
 from ._version import __version__
 from .emails import EmailMessage, EmailSendResult
 from .models import CreateInvoiceRequest, InvoiceDocument, InvoiceOptions, PdfLanguage
+from .parsing import ParsedInvoice
 from .transport import Transport, TransportRequest, TransportResponse, UrllibTransport
 from .validation import ValidationFinding, ValidationReport, ValidationResult
 
@@ -51,7 +52,7 @@ class ZugferdXRechnungClient:
     listing the violated rules.
 
     HTTP 429 responses are retried automatically after the ``Retry-After`` delay,
-    except on transform calls. Other errors raise an :class:`InvoiceXmlApiError` subclass, and network
+    except on transform and parse calls. Other errors raise an :class:`InvoiceXmlApiError` subclass, and network
     failures raise :class:`InvoiceXmlConnectionError`.
 
     Instances hold no connection state and are safe to share between threads.
@@ -64,8 +65,8 @@ class ZugferdXRechnungClient:
         :param api_key: Your InvoiceXML API key. Defaults to the ``INVOICEXML_API_KEY`` environment variable.
         :param base_url: The API base URL, without the ``/v1`` path.
         :param timeout: Overall timeout of one request, in seconds.
-        :param max_retries: How often a request answered with HTTP 429 is retried, on every call except transform.
-            0 disables retries.
+        :param max_retries: How often a request answered with HTTP 429 is retried, on every call except transform
+            and parse. 0 disables retries.
         :param max_retry_wait: The longest ``Retry-After`` delay, in seconds, the client waits out by itself.
         :param transport: A custom HTTP layer, see :mod:`invoicexml_zugferd_xrechnung.transport`.
         """
@@ -278,21 +279,12 @@ class ZugferdXRechnungClient:
 
     # ------------------------------------------------------------------ render
 
-    def render_xrechnung_to_pdf(self, xml: FileInput, *, language: LanguageInput = None, logo_url: str | None = None,
-                                include_qr_code: bool | None = None) -> bytes:
-        """Render an XRechnung XML (UBL or CII) as a human-readable PDF.
-
-        :param xml: A path, the XML bytes, or a :class:`FileUpload`.
-        :param language: Language of the PDF. English when omitted.
-        :param logo_url: Public URL of the seller's logo (PNG or JPEG, at most 2 MB).
-        :param include_qr_code: Print the EPC payment QR code (GiroCode). Not printed when omitted.
-        :returns: The PDF bytes.
-        """
-        return self._render("/v1/render/xrechnung/to/pdf", xml, language, logo_url, include_qr_code)
-
-    def render_cii_to_pdf(self, xml: FileInput, *, language: LanguageInput = None, logo_url: str | None = None,
+    def render_xml_to_pdf(self, xml: FileInput, *, language: LanguageInput = None, logo_url: str | None = None,
                           include_qr_code: bool | None = None) -> bytes:
-        """Render a CII invoice XML, such as the XML of a ZUGFeRD invoice, as a human-readable PDF.
+        """Render an invoice XML as a human-readable PDF.
+
+        XRechnung (UBL or CII), CII (such as the XML of a ZUGFeRD invoice) and UBL are
+        all accepted; the format is detected from the XML.
 
         :param xml: A path, the XML bytes, or a :class:`FileUpload`.
         :param language: Language of the PDF. English when omitted.
@@ -300,7 +292,12 @@ class ZugferdXRechnungClient:
         :param include_qr_code: Print the EPC payment QR code (GiroCode). Not printed when omitted.
         :returns: The PDF bytes.
         """
-        return self._render("/v1/render/cii/to/pdf", xml, language, logo_url, include_qr_code)
+        parts: list[tuple[str, Any]] = [("file", to_upload(xml))]
+        parts += _language_part("language", language)
+        if logo_url is not None:
+            parts.append(("logoUrl", logo_url))
+        parts += _flag_part("includeQrCode", include_qr_code)
+        return self._post_form("/v1/render/xml/to/pdf", parts).body
 
     # ----------------------------------------------------------------- convert
 
@@ -469,6 +466,27 @@ class ZugferdXRechnungClient:
         response = self._post_form("/v1/extract/json", [("file", to_upload(file))], accept_json=True)
         return InvoiceDocument.from_dict(self._read_json(response, "/v1/extract/json").get("invoice") or {})
 
+    def parse_json(self, file: FileInput) -> ParsedInvoice:
+        """Read a PDF invoice with AI into the invoice model.
+
+        Works on typed, scanned and photographed PDFs. AI reads the data, so a person
+        must check it before it is used. An XML embedded in the PDF is ignored; use
+        :meth:`extract_json` to read that.
+
+        ``confidence`` scores the read per area from 0 (had to guess) to 1
+        (unambiguous), and ``language`` is the ISO 639-1 code of the language the
+        invoice is written in. Each is ``None`` when the response leaves it out.
+
+        A 429 on this method is not retried automatically, so wait for ``Retry-After``
+        before calling again if you want to retry.
+
+        :param file: A path, the PDF bytes, or a :class:`FileUpload`.
+        :returns: The invoice with its confidence scores and language.
+        """
+        response = self._post_form("/v1/parse/json", [("file", to_upload(file))], accept_json=True,
+                                   retry_rate_limit=False)
+        return ParsedInvoice.from_dict(self._read_json(response, "/v1/parse/json"))
+
     def extract_attachments(self, file: FileInput) -> bytes:
         """Extract the supporting documents embedded in an invoice as a ZIP archive.
 
@@ -501,15 +519,6 @@ class ZugferdXRechnungClient:
     def _post_form_for_report(self, path: str, parts: list[tuple[str, Any]]) -> ValidationReport:
         response = self._post_form(path, parts)
         return ValidationReport(file=response.body, valid=_verdict(response.header("X-Invoice-Valid")))
-
-    def _render(self, path: str, xml: FileInput, language: LanguageInput, logo_url: str | None,
-                include_qr_code: bool | None) -> bytes:
-        parts: list[tuple[str, Any]] = [("file", to_upload(xml))]
-        parts += _language_part("language", language)
-        if logo_url is not None:
-            parts.append(("logoUrl", logo_url))
-        parts += _flag_part("includeQrCode", include_qr_code)
-        return self._post_form(path, parts).body
 
     def _convert_to_xml(self, path: str, file: FileInput, validation_language: LanguageInput) -> str:
         parts: list[tuple[str, Any]] = [("file", to_upload(file))]

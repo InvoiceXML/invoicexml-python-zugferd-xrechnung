@@ -105,7 +105,7 @@ def test_create_and_validate_xrechnung_cii(api, xrechnung_cii):
 
 
 def test_render_and_embed(api, xrechnung_cii):
-    rendered = api.render_xrechnung_to_pdf(xrechnung_cii.encode("utf-8"), language=PdfLanguage.DE)
+    rendered = api.render_xml_to_pdf(xrechnung_cii.encode("utf-8"), language=PdfLanguage.DE)
     assert_pdf(rendered)
     hybrid = api.embed_zugferd(rendered, xrechnung_cii.encode("utf-8"))
     assert_pdf(hybrid)

@@ -18,6 +18,9 @@ from invoicexml_zugferd_xrechnung import (
     InvoiceValidationError,
     InvoiceXmlApiError,
     InvoiceXmlConnectionError,
+    ParseConfidence,
+    ParseConfidenceAreas,
+    ParsedInvoice,
     PayloadTooLargeError,
     PdfLanguage,
     RateLimitError,
@@ -521,30 +524,20 @@ def test_a_single_copy_address_in_a_dict_is_a_list_on_both_route_types(client, s
 
 # ------------------------------------------------------------------- render
 
-def test_render_xrechnung_sends_language_and_logo(client, stub):
-    stub.respond(200, PDF, "application/pdf")
-
-    client.render_xrechnung_to_pdf(XML.encode(), language=PdfLanguage.DE, logo_url="https://example.com/logo.png")
-
-    body = text(stub.last)
-    assert stub.last.url.endswith("/v1/render/xrechnung/to/pdf")
-    assert 'name="language"\r\n\r\nde\r\n' in body
-    assert 'name="logoUrl"\r\n\r\nhttps://example.com/logo.png\r\n' in body
-
-
-@pytest.mark.parametrize("method, route", [("render_xrechnung_to_pdf", "/v1/render/xrechnung/to/pdf"),
-                                           ("render_cii_to_pdf", "/v1/render/cii/to/pdf")])
-def test_render_sends_only_what_is_set(client, stub, method, route):
+def test_render_xml_sends_only_what_is_set(client, stub):
     stub.respond(200, PDF, "application/pdf").respond(200, PDF, "application/pdf").respond(200, PDF, "application/pdf")
 
-    assert getattr(client, method)(XML.encode()) == PDF
-    getattr(client, method)(XML.encode(), language="DE", logo_url="https://example.com/logo.png", include_qr_code=True)
-    getattr(client, method)(XML.encode(), include_qr_code=False)
+    assert client.render_xml_to_pdf(XML.encode()) == PDF
+    client.render_xml_to_pdf(XML.encode(), language=PdfLanguage.DE, logo_url="https://example.com/logo.png",
+                             include_qr_code=True)
+    client.render_xml_to_pdf(XML.encode(), include_qr_code=False)
 
-    assert stub.requests[0].url == f"https://api.invoicexml.com{route}"
+    assert stub.requests[0].url == "https://api.invoicexml.com/v1/render/xml/to/pdf"
+    assert 'name="file"; filename="invoice.xml"' in text(stub.requests[0])
     assert part_names(stub.requests[0]) == ["file"]
     assert part_names(stub.requests[1]) == ["file", "language", "logoUrl", "includeQrCode"]
     assert 'name="language"\r\n\r\nde\r\n' in text(stub.requests[1])
+    assert 'name="logoUrl"\r\n\r\nhttps://example.com/logo.png\r\n' in text(stub.requests[1])
     assert 'name="includeQrCode"\r\n\r\ntrue\r\n' in text(stub.requests[1])
     assert 'name="includeQrCode"\r\n\r\nfalse\r\n' in text(stub.requests[2])
 
@@ -732,6 +725,65 @@ def test_extract_attachments_returns_zip(client, stub):
     assert stub.last.url.endswith("/v1/extract/attachments")
 
 
+# -------------------------------------------------------------------- parse
+
+def test_parse_json_returns_the_invoice_confidence_and_language(client, stub, tmp_path):
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(PDF)
+    payload = json.loads(fixture("extract-json.json"))
+    payload["confidence"] = {"overall": 0.9, "areas": {"sellerIdentification": 1, "buyerIdentification": 0.95,
+                                                       "taxCalculation": None, "lineItems": 0.75}}
+    payload["language"] = "de"
+    stub.respond_json(200, payload)
+
+    parsed = client.parse_json(pdf)
+
+    r = stub.last
+    assert r.url == "https://api.invoicexml.com/v1/parse/json"
+    assert r.header("Accept") == "application/json"
+    assert part_names(r) == ["file"]
+    assert 'name="file"; filename="scan.pdf"' in text(r)
+    assert "Content-Type: application/pdf" in text(r)
+    assert parsed.invoice.invoice_number == "RE-2026-001"
+    assert parsed.invoice.totals.grand_total_amount == Decimal("2975.00")
+    assert parsed.confidence == ParseConfidence(
+        overall=Decimal("0.9"),
+        areas=ParseConfidenceAreas(seller_identification=Decimal(1), buyer_identification=Decimal("0.95"),
+                                   tax_calculation=None, line_items=Decimal("0.75")))
+    assert parsed.language == "de"
+
+
+def test_parse_json_without_confidence_or_language(client, stub):
+    stub.respond_json(200, {"invoice": {"invoiceNumber": "RE-1"}})
+
+    parsed = client.parse_json(PDF)
+
+    assert parsed == ParsedInvoice(invoice=parsed.invoice)
+    assert parsed.invoice.invoice_number == "RE-1"
+    assert parsed.confidence is None
+    assert parsed.language is None
+
+
+def test_parse_json_rate_limit_makes_one_request_and_raises(client, stub, sleeps):
+    stub.respond_json(429, {"title": "Too many requests", "errorCode": 4019}, Retry_After="2")
+
+    with pytest.raises(RateLimitError) as info:
+        client.parse_json(PDF)
+
+    assert len(stub.requests) == 1
+    assert sleeps == []
+    assert info.value.retry_after == 2.0
+
+
+def test_parse_json_refusal_maps_to_api_error(client, stub):
+    stub.respond_json(400, {"title": "Not an invoice", "errorCode": 4008})
+
+    with pytest.raises(InvoiceXmlApiError) as info:
+        client.parse_json(PDF)
+
+    assert info.value.error_code == ErrorCode.NOT_AN_INVOICE
+
+
 # ------------------------------------------------------------------ retries
 
 def test_retries_after_rate_limit_using_retry_after_seconds(client, stub, sleeps):
@@ -758,13 +810,13 @@ def test_render_convert_and_report_retry_after_a_rate_limit(client, stub, sleeps
     stub.respond_json(429, {}, Retry_After="1").respond(200, XML, "application/xml")
     stub.respond_json(429, {}, Retry_After="1").respond(200, PDF, "application/pdf", X_Invoice_Valid="true")
 
-    client.render_cii_to_pdf(FileUpload.xml(XML))
+    client.render_xml_to_pdf(FileUpload.xml(XML))
     client.convert_zugferd_to_ubl(PDF)
     client.validate_zugferd_report(PDF)
 
     assert [request.url.removeprefix("https://api.invoicexml.com") for request in stub.requests] == [
-        "/v1/render/cii/to/pdf",
-        "/v1/render/cii/to/pdf",
+        "/v1/render/xml/to/pdf",
+        "/v1/render/xml/to/pdf",
         "/v1/convert/zugferd/to/ubl",
         "/v1/convert/zugferd/to/ubl",
         "/v1/validate/zugferd/report",

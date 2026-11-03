@@ -6,7 +6,7 @@ Create, validate, embed, render, convert and extract **ZUGFeRD** and **XRechnung
 - Typed EN 16931 dataclasses generated from the API's OpenAPI schema
 - Exact decimal amounts, never floats on the wire
 - Rejected invoices surface the violated rules as typed findings
-- Automatic retry on HTTP 429 on every call except transform, honouring `Retry-After`
+- Automatic retry on HTTP 429 on every call except transform and parse, honouring `Retry-After`
 
 ## Installation
 
@@ -46,8 +46,8 @@ Totals and the VAT breakdown are calculated from the lines. The PDF is a ZUGFeRD
 |---|---|---|
 | `create_zugferd(invoice, options=None)` | `POST /v1/create/zugferd` | ZUGFeRD PDF/A-3 (`bytes`) |
 | `create_xrechnung(invoice, options=None)` | `POST /v1/create/xrechnung` | XRechnung XML (`str`) |
-| `create_cii(invoice, options=None)` | [`POST /v1/create/cii`](https://www.invoicexml.com/docs/api/create/cii) | CII XML (`str`) |
-| `create_ubl(invoice, options=None)` | [`POST /v1/create/ubl`](https://www.invoicexml.com/docs/api/create/ubl) | UBL XML (`str`) |
+| `create_cii(invoice, options=None)` | `POST /v1/create/cii` | CII XML (`str`) |
+| `create_ubl(invoice, options=None)` | `POST /v1/create/ubl` | UBL XML (`str`) |
 | `validate_zugferd(pdf)` | `POST /v1/validate/zugferd` | `ValidationResult` |
 | `validate_xrechnung(xml)` | `POST /v1/validate/xrechnung` | `ValidationResult` |
 | `validate_zugferd_report(pdf, *, validation_language=None)` | `POST /v1/validate/zugferd/report` | `ValidationReport` |
@@ -56,8 +56,7 @@ Totals and the VAT breakdown are calculated from the lines. The PDF is a ZUGFeRD
 | `email_zugferd(invoice, email, options=None)` | `POST /v1/create/zugferd/email` | `EmailSendResult` |
 | `email_xrechnung(invoice, email, options=None)` | `POST /v1/create/xrechnung/email` | `EmailSendResult` |
 | `email_embedded_zugferd(pdf, xml, email)` | `POST /v1/embed/zugferd/email` | `EmailSendResult` |
-| `render_xrechnung_to_pdf(xml, *, language=None, logo_url=None, include_qr_code=None)` | `POST /v1/render/xrechnung/to/pdf` | Readable PDF (`bytes`) |
-| `render_cii_to_pdf(xml, *, language=None, logo_url=None, include_qr_code=None)` | `POST /v1/render/cii/to/pdf` | Readable PDF (`bytes`) |
+| `render_xml_to_pdf(xml, *, language=None, logo_url=None, include_qr_code=None)` | `POST /v1/render/xml/to/pdf` | Readable PDF (`bytes`) |
 | `convert_zugferd_to_ubl(pdf, *, validation_language=None)` | `POST /v1/convert/zugferd/to/ubl` | UBL XML (`str`) |
 | `convert_zugferd_to_cii(pdf, *, validation_language=None)` | `POST /v1/convert/zugferd/to/cii` | CII XML (`str`) |
 | `convert_xrechnung_to_ubl(xml, *, validation_language=None)` | `POST /v1/convert/xrechnung/to/ubl` | UBL XML (`str`) |
@@ -70,6 +69,7 @@ Totals and the VAT breakdown are calculated from the lines. The PDF is a ZUGFeRD
 | `transform_to_zugferd(pdf, *, language=None, preserve_original_pdf=None, include_advanced_properties=None, validation_language=None)` | `POST /v1/transform/to/zugferd` | ZUGFeRD PDF/A-3 (`bytes`), to be checked by a person |
 | `transform_to_xrechnung(pdf, buyer_reference, *, validation_language=None)` | `POST /v1/transform/to/xrechnung` | XRechnung XML (`str`), to be checked by a person |
 | `extract_json(file)` | `POST /v1/extract/json` | `InvoiceDocument` |
+| `parse_json(file)` | `POST /v1/parse/json` | `ParsedInvoice`, to be checked by a person |
 | `extract_attachments(file)` | `POST /v1/extract/attachments` | ZIP of embedded documents (`bytes`) |
 
 File parameters accept a path, the raw bytes of a PDF or XML document, or a `FileUpload`. The invoice and options also accept plain dicts in the API's JSON shape.
@@ -101,7 +101,7 @@ pdf = client.embed_zugferd("my-invoice.pdf", FileUpload.xml(xml))
 
 ## Create a UBL invoice
 
-`create_ubl` builds a UBL 2.1 XML from the same invoice object, validated against the rule set of the profile you pick (Peppol BIS Billing 3.0 when omitted):
+`create_ubl` builds a UBL 2.1 XML from the same invoice object, validated against the rule set of the profile you pick (Peppol BIS Billing 3.0 when omitted, see the [create UBL reference](https://www.invoicexml.com/docs/api/create/ubl)):
 
 ```python
 xml = client.create_ubl(invoice, InvoiceOptions(profile=UblProfile.PEPPOL_BIS_3))
@@ -168,14 +168,14 @@ A failed verdict is a normal result, not an exception. `report.valid` is `True`,
 
 ## Render an invoice as PDF
 
-Turn an XML invoice into a readable PDF, for a preview or for people who cannot read XML. `render_xrechnung_to_pdf` takes an XRechnung in UBL or CII syntax, and `render_cii_to_pdf` takes a CII XML:
+Turn any invoice XML into a readable PDF, for a preview or for people who cannot read XML. XRechnung (UBL or CII), CII (such as the XML of a ZUGFeRD invoice) and UBL are all accepted, and the format is detected from the XML:
 
 ```python
-pdf = client.render_xrechnung_to_pdf("invoice.xml", language=PdfLanguage.DE, include_qr_code=True,
-                                     logo_url="https://example.com/logo.png")
+pdf = client.render_xml_to_pdf("invoice.xml", language=PdfLanguage.DE, include_qr_code=True,
+                               logo_url="https://example.com/logo.png")
 ```
 
-`language` picks `en`, `de` or `fr`, and `include_qr_code` prints the payment QR code. See the [XRechnung](https://www.invoicexml.com/docs/api/render/xrechnung/to/pdf) and [CII](https://www.invoicexml.com/docs/api/render/cii/to/pdf) render guides.
+`language` picks `en`, `de` or `fr`, and `include_qr_code` prints the payment QR code. See the [render guide](https://www.invoicexml.com/docs/api/render/xml/to/pdf).
 
 ## Convert between formats
 
@@ -200,6 +200,19 @@ xml = client.transform_to_xrechnung("invoice.pdf", "04011000-12345-34")
 
 `transform_to_xrechnung` requires the buyer reference (Leitweg-ID). By default the ZUGFeRD PDF is rendered from the data the AI read, in the language of the invoice, and ends with an "Electronic invoice details" section, so the data can be checked on the pages. `language` takes `en`, `de`, `fr` or `auto`, the default. Set `include_advanced_properties=False` to leave that section out, or `preserve_original_pdf=True` to keep the uploaded PDF as the visual layer. A 429 on these methods is not retried automatically, so wait for `Retry-After` before calling again if you want to retry. See the [ZUGFeRD](https://www.invoicexml.com/docs/api/transform/to/zugferd) and [XRechnung](https://www.invoicexml.com/docs/api/transform/to/xrechnung) guides.
 
+## Read a PDF invoice with AI
+
+`parse_json` has AI read a typed, scanned or photographed PDF invoice into the invoice model, with a confidence score per area and the language the invoice is written in. A person must check the data before it is used, and an XML embedded in the PDF is ignored (`extract_json` reads that):
+
+```python
+parsed = client.parse_json("scanned-invoice.pdf")
+print(parsed.invoice.invoice_number, parsed.language)
+if parsed.confidence:
+    print(parsed.confidence.overall, parsed.confidence.areas.line_items)
+```
+
+Scores run from 0 (had to guess) to 1 (unambiguous). `language` is a lowercase ISO 639-1 code, or `None` when it could not be told. Any language can come back, so it is not always a `PdfLanguage` the create and render methods take. A 429 on this method is not retried automatically. See the [parse guide](https://www.invoicexml.com/docs/api/parse/json).
+
 ## Errors, rate limits and retries
 
 All exceptions extend `InvoiceXmlError`.
@@ -213,13 +226,17 @@ All exceptions extend `InvoiceXmlError`.
 | `InvoiceXmlApiError` | Any other error response, with `error_code` from `ErrorCode` |
 | `InvoiceXmlConnectionError` | The API could not be reached |
 
-On HTTP 429 every call except transform waits for the `Retry-After` delay and retries, three times by default. A 429 is not billed.
+On HTTP 429 every call except transform and parse waits for the `Retry-After` delay and retries, three times by default. A 429 is not billed.
 
 ```python
 client = ZugferdXRechnungClient(api_key, max_retries=5, max_retry_wait=30, timeout=60)
 ```
 
 The client holds no connection state and is safe to share between threads. To send requests through `requests`, `httpx` or your own tracing, pass any object with a `send(request)` method as `transport`; see `invoicexml_zugferd_xrechnung.transport`.
+
+## Examples
+
+The [examples](https://github.com/InvoiceXML/invoicexml-python-zugferd-xrechnung/tree/main/examples) folder has one runnable script per common task: create a ZUGFeRD invoice with your own PDF, create a CII and embed it, email, validate, render, convert, transform, parse with AI, and extract. Each one is a complete `main.py` you can read from top to bottom and adapt.
 
 ## Why InvoiceXML
 

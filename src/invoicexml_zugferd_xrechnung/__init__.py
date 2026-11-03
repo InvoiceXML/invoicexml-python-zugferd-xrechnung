@@ -2,8 +2,8 @@
 
 Create ZUGFeRD PDF/A-3 hybrids, XRechnung XML and plain CII or UBL XML from
 the EN 16931 model, validate incoming files, embed XML into existing PDFs,
-render XML as PDF, convert between formats, and extract invoices back into the
-model.
+render invoice XML as PDF, convert between formats, extract invoices back into
+the model, and read PDF invoices with AI.
 
 >>> from invoicexml_zugferd_xrechnung import ZugferdXRechnungClient
 >>> client = ZugferdXRechnungClient()          # reads INVOICEXML_API_KEY
@@ -25,6 +25,7 @@ from ._version import __version__
 from .emails import EmailMessage, EmailSendResult
 from .models import *  # noqa: F401,F403
 from .models import __all__ as _model_names
+from .parsing import ParseConfidence, ParseConfidenceAreas, ParsedInvoice
 from .validation import (
     ReportFinding,
     ReportRow,
@@ -46,6 +47,9 @@ __all__ = [
     "InvoiceXmlApiError",
     "InvoiceXmlConnectionError",
     "InvoiceXmlError",
+    "ParseConfidence",
+    "ParseConfidenceAreas",
+    "ParsedInvoice",
     "PayloadTooLargeError",
     "RateLimitError",
     "ReportFinding",

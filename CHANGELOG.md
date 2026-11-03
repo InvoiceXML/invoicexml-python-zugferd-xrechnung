@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- Add `parse_json`, which has AI read a typed, scanned or photographed PDF invoice into the invoice model and returns a `ParsedInvoice` with confidence scores per area and the invoice's language. A 429 on this call is not retried automatically.
+- Breaking: `render_xrechnung_to_pdf` and `render_cii_to_pdf` are replaced by `render_xml_to_pdf`, which renders any invoice XML (XRechnung, CII or UBL) as PDF and detects the format itself. It takes the same arguments.
+- Add `examples/`: one runnable script per common task, built on the library source in this repository.
+
 ## 0.4.0
 
 - Add `create_cii`, which builds a plain CII XML from the invoice model, ready for `embed_zugferd` to turn your own PDF into a ZUGFeRD invoice.
