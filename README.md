@@ -46,6 +46,8 @@ Totals and the VAT breakdown are calculated from the lines. The PDF is a ZUGFeRD
 |---|---|---|
 | `create_zugferd(invoice, options=None)` | `POST /v1/create/zugferd` | ZUGFeRD PDF/A-3 (`bytes`) |
 | `create_xrechnung(invoice, options=None)` | `POST /v1/create/xrechnung` | XRechnung XML (`str`) |
+| `create_cii(invoice, options=None)` | [`POST /v1/create/cii`](https://www.invoicexml.com/docs/api/create/cii) | CII XML (`str`) |
+| `create_ubl(invoice, options=None)` | [`POST /v1/create/ubl`](https://www.invoicexml.com/docs/api/create/ubl) | UBL XML (`str`) |
 | `validate_zugferd(pdf)` | `POST /v1/validate/zugferd` | `ValidationResult` |
 | `validate_xrechnung(xml)` | `POST /v1/validate/xrechnung` | `ValidationResult` |
 | `validate_zugferd_report(pdf, *, validation_language=None)` | `POST /v1/validate/zugferd/report` | `ValidationReport` |
@@ -84,6 +86,25 @@ For ZUGFeRD, the options also set the PDF language, a logo, a brand colour, or y
 
 ```python
 pdf = client.create_zugferd(invoice, InvoiceOptions(language=PdfLanguage.DE, logo_url="https://example.com/logo.png"))
+```
+
+## Use your own PDF layout
+
+To keep the PDF your own system prints, create the CII XML from the same invoice object and embed it into that PDF. The XML declares the EN 16931 profile, so `embed_zugferd` takes it as is:
+
+```python
+xml = client.create_cii(invoice, InvoiceOptions(language=PdfLanguage.DE))
+pdf = client.embed_zugferd("my-invoice.pdf", FileUpload.xml(xml))
+```
+
+`language` sets the default texts written into the XML, such as the payment terms. See the [create CII guide](https://www.invoicexml.com/docs/api/create/cii).
+
+## Create a UBL invoice
+
+`create_ubl` builds a UBL 2.1 XML from the same invoice object, validated against the rule set of the profile you pick (Peppol BIS Billing 3.0 when omitted):
+
+```python
+xml = client.create_ubl(invoice, InvoiceOptions(profile=UblProfile.PEPPOL_BIS_3))
 ```
 
 ## Send an invoice by email

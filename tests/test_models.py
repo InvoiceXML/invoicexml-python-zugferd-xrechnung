@@ -16,6 +16,7 @@ from invoicexml_zugferd_xrechnung import (
     PdfLanguage,
     PriceDetails,
     SellerIdentifier,
+    UblProfile,
     VatCategoryCode,
     XRechnungSyntax,
 )
@@ -61,6 +62,13 @@ def test_enums_accept_strings_and_tolerate_new_values():
     assert InvoiceOptions.from_dict({"syntax": "cii", "language": "FR"}).syntax is XRechnungSyntax.CII
     assert InvoiceOptions.from_dict({"language": "FR"}).language is PdfLanguage.FR
     assert VatCategoryCode.STANDARD_RATE == "S"
+
+
+def test_ubl_profile_round_trip():
+    assert InvoiceOptions(profile=UblProfile.PEPPOL_BIS_3).to_dict() == {"profile": "peppol-bis-3"}
+    assert InvoiceOptions(profile="nlcius").to_dict() == {"profile": "nlcius"}
+    assert InvoiceOptions.from_dict({"profile": "xrechnung"}).profile is UblProfile.XRECHNUNG
+    assert InvoiceOptions.from_dict({"profile": "future-profile"}).profile == "future-profile"
 
 
 def test_unknown_properties_are_ignored():

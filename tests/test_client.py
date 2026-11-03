@@ -21,6 +21,7 @@ from invoicexml_zugferd_xrechnung import (
     PayloadTooLargeError,
     PdfLanguage,
     RateLimitError,
+    UblProfile,
     ValidationReport,
     XRechnungSyntax,
     ZugferdXRechnungClient,
@@ -30,6 +31,7 @@ from invoicexml_zugferd_xrechnung.validation import LAYER_CIUS, LAYER_EN16931
 PDF = b"%PDF-1.7 stub"
 XML = '<?xml version="1.0"?><Invoice/>'
 SENT = {"status": "accepted", "messageId": "0102abc"}
+CREATE_XML = [("create_cii", "/v1/create/cii"), ("create_ubl", "/v1/create/ubl")]
 REPORTS = [("validate_zugferd_report", "/v1/validate/zugferd/report", PDF),
            ("validate_xrechnung_report", "/v1/validate/xrechnung/report", XML.encode())]
 CONVERT_TO_XML = [("convert_zugferd_to_ubl", "/v1/convert/zugferd/to/ubl", PDF),
@@ -109,6 +111,58 @@ def test_create_xrechnung_returns_xml_and_sends_syntax(client, stub):
     assert sent["invoice"]["buyerReference"] == "04011000-12345-34"
 
 
+@pytest.mark.parametrize("method, route", CREATE_XML)
+def test_create_xml_posts_json_and_returns_the_xml(client, stub, method, route):
+    stub.respond(200, XML, "application/xml", Content_Disposition='attachment; filename="invoice-RE-2026-001.xml"')
+
+    assert getattr(client, method)(sample_invoice()) == XML
+
+    r = stub.last
+    assert r.url == "https://api.invoicexml.com" + route
+    assert r.header("Content-Type") == "application/json"
+    assert r.header("Accept") is None
+    sent = json.loads(r.body)
+    assert sent["invoice"]["invoiceNumber"] == "RE-2026-001"
+    assert "options" not in sent
+
+
+@pytest.mark.parametrize("method, route", CREATE_XML)
+def test_create_xml_accepts_plain_dicts(client, stub, method, route):
+    stub.respond(200, XML, "application/xml")
+
+    getattr(client, method)({"invoiceNumber": "X-1", "currency": "EUR"}, {"language": "DE"})
+
+    assert json.loads(stub.last.body) == {"invoice": {"invoiceNumber": "X-1", "currency": "EUR"},
+                                          "options": {"language": "DE"}}
+
+
+@pytest.mark.parametrize("method, route", CREATE_XML)
+def test_create_xml_rejection_carries_findings(client, stub, method, route):
+    stub.respond_json(400, fixture("create-400.json"))
+
+    with pytest.raises(InvoiceValidationError) as info:
+        getattr(client, method)(sample_invoice())
+
+    assert info.value.errors[0].rule == "BR-CO-26"
+
+
+def test_create_cii_sends_the_language(client, stub):
+    stub.respond(200, XML, "application/xml")
+
+    client.create_cii(sample_invoice(), InvoiceOptions(language=PdfLanguage.DE))
+
+    assert json.loads(stub.last.body)["options"] == {"language": "DE"}
+
+
+def test_create_ubl_sends_profile_and_language(client, stub):
+    stub.respond(200, XML, "application/xml")
+
+    client.create_ubl(sample_invoice(), InvoiceOptions(profile=UblProfile.XRECHNUNG, language=PdfLanguage.DE))
+
+    assert stub.last.url.endswith("/v1/create/ubl")
+    assert json.loads(stub.last.body)["options"] == {"profile": "xrechnung", "language": "DE"}
+
+
 def test_create_rejection_carries_findings(client, stub):
     stub.respond_json(400, fixture("create-400.json"))
 
@@ -133,6 +187,9 @@ def test_create_rejection_carries_findings(client, stub):
 def test_create_requires_an_invoice(client):
     with pytest.raises(TypeError):
         client.create_zugferd(None)  # type: ignore[arg-type]
+    for method in ("create_cii", "create_ubl"):
+        with pytest.raises(TypeError):
+            getattr(client, method)(None)
 
 
 # ----------------------------------------------------------------- validate

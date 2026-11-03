@@ -1,8 +1,9 @@
 """Python client for ZUGFeRD and XRechnung e-invoices via the InvoiceXML API.
 
-Create ZUGFeRD PDF/A-3 hybrids and XRechnung XML from the EN 16931 model,
-validate incoming files, embed XML into existing PDFs, render XML as PDF,
-convert between formats, and extract invoices back into the model.
+Create ZUGFeRD PDF/A-3 hybrids, XRechnung XML and plain CII or UBL XML from
+the EN 16931 model, validate incoming files, embed XML into existing PDFs,
+render XML as PDF, convert between formats, and extract invoices back into the
+model.
 
 >>> from invoicexml_zugferd_xrechnung import ZugferdXRechnungClient
 >>> client = ZugferdXRechnungClient()          # reads INVOICEXML_API_KEY

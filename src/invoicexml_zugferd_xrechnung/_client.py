@@ -121,6 +121,37 @@ class ZugferdXRechnungClient:
         """
         return self._post_json("/v1/create/xrechnung", invoice, options).body.decode("utf-8")
 
+    def create_cii(self, invoice: InvoiceInput, options: OptionsInput = None) -> str:
+        """Create a plain UN/CEFACT CII invoice XML, without a PDF.
+
+        The XML declares the EN 16931 profile, so :meth:`embed_zugferd` takes it as is
+        to turn your own PDF into a ZUGFeRD invoice. Totals and the VAT breakdown are
+        calculated from the lines when omitted.
+
+        :param invoice: The invoice, as a model or a dict in the API's JSON shape.
+        :param options: The ``language`` of default texts such as the payment terms.
+            The PDF settings are ignored.
+        :returns: The XML document.
+        :raises InvoiceValidationError: The invoice violates the rule set.
+        """
+        return self._post_json("/v1/create/cii", invoice, options).body.decode("utf-8")
+
+    def create_ubl(self, invoice: InvoiceInput, options: OptionsInput = None) -> str:
+        """Create a UBL 2.1 invoice XML, without a PDF.
+
+        ``options.profile`` picks the CustomizationID the XML declares and the rule set
+        the invoice is validated against, Peppol BIS Billing 3.0 when omitted (see
+        :class:`UblProfile`). Totals and the VAT breakdown are calculated from the lines
+        when omitted.
+
+        :param invoice: The invoice, as a model or a dict in the API's JSON shape.
+        :param options: The UBL ``profile`` and the ``language`` of default texts such as
+            the payment terms. The PDF settings are ignored.
+        :returns: The XML document.
+        :raises InvoiceValidationError: The invoice violates the rule set.
+        """
+        return self._post_json("/v1/create/ubl", invoice, options).body.decode("utf-8")
+
     # ---------------------------------------------------------------- validate
 
     def validate_zugferd(self, pdf: FileInput) -> ValidationResult:
